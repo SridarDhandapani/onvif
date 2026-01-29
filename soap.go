@@ -3,6 +3,7 @@ package onvif
 import (
 	"bytes"
 	"crypto/sha1"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -50,6 +51,10 @@ func (c *Client) sendSOAPRequest(endpoint, action, body string) ([]byte, error) 
 		namespace = "tds=\"http://www.onvif.org/ver10/device/wsdl\""
 	} else if strings.Contains(endpoint, "media_service") {
 		namespace = "trt=\"http://www.onvif.org/ver10/media/wsdl\""
+	} else if strings.Contains(endpoint, "imaging") {
+		namespace = "timg=\"http://www.onvif.org/ver20/imaging/wsdl\""
+	} else if strings.Contains(endpoint, "media2") {
+		namespace = "tr2=\"http://www.onvif.org/ver20/media/wsdl\""
 	} else {
 		namespace = "tds=\"http://www.onvif.org/ver10/device/wsdl\""
 	}
@@ -74,13 +79,32 @@ func (c *Client) sendSOAPRequest(endpoint, action, body string) ([]byte, error) 
 	}
 
 	client := &http.Client{Timeout: timeout}
+	if c.InsecureTLS {
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	return io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check HTTP status before parsing body — some cameras return
+	// error codes with an empty body instead of a SOAP fault
+	if resp.StatusCode >= 400 {
+		if len(respBody) == 0 {
+			return nil, fmt.Errorf("HTTP %d with empty response", resp.StatusCode)
+		}
+		return respBody, fmt.Errorf("HTTP %d: %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+
+	return respBody, nil
 }
 
 // getFirstAddress extracts the first address if multiple are provided

@@ -19,6 +19,7 @@ func main() {
 	// New user credentials (for create/modify)
 	var newUser, newPass string
 	var userLevel string
+	var insecure bool
 
 	flag.StringVar(&currentUser, "user", "", "Current ONVIF username (empty for anonymous/factory-reset)")
 	flag.StringVar(&currentPass, "pass", "", "Current ONVIF password (empty for anonymous/factory-reset)")
@@ -28,6 +29,7 @@ func main() {
 	flag.StringVar(&newUser, "new-user", "", "New username to create or modify")
 	flag.StringVar(&newPass, "new-pass", "", "New password for the user")
 	flag.StringVar(&userLevel, "level", "Administrator", "User level: Administrator, Operator, User")
+	flag.BoolVar(&insecure, "insecure", false, "Skip TLS certificate verification")
 	flag.Parse()
 
 	if cameraIP == "" {
@@ -53,6 +55,7 @@ func main() {
 
 	// Create client (empty credentials for factory-reset/anonymous access)
 	client := onvif.NewClient(currentUser, currentPass)
+	client.InsecureTLS = insecure
 
 	camera := onvif.Camera{
 		Address: fmt.Sprintf("http://%s/onvif/device_service", cameraIP),
@@ -98,7 +101,20 @@ func main() {
 			log.Fatalf("Failed to create admin user: %v", err)
 		}
 
+		// Verify by authenticating with the new credentials
+		verifyClient := onvif.NewClient(newUser, newPass)
+		verifyClient.InsecureTLS = insecure
+		users, err := verifyClient.GetUsers(&camera)
+		if err != nil {
+			log.Fatalf("User creation appeared to succeed but verification failed: %v\n"+
+				"The camera may not be in factory-reset state, or may already have credentials configured.", err)
+		}
+
 		fmt.Printf("Success! Admin user '%s' created.\n", newUser)
+		fmt.Println("\nVerified users:")
+		for _, u := range users {
+			fmt.Printf("  - %s (%s)\n", u.Username, u.UserLevel)
+		}
 		fmt.Printf("\nYou can now use:\n")
 		fmt.Printf("  -user %s -pass <your-password>\n", newUser)
 		return

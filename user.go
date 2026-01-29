@@ -1,7 +1,6 @@
 package onvif
 
 import (
-	"bytes"
 	"encoding/xml"
 	"fmt"
 	"strings"
@@ -43,21 +42,15 @@ func (c *Client) GetUsers(camera *Camera) ([]User, error) {
 		return users, nil
 	}
 
-	// Fallback to manual extraction
+	// Fallback to manual extraction (namespace-agnostic)
 	respStr := string(resp)
 	for {
-		userStart := strings.Index(respStr, "<tds:User>")
-		if userStart == -1 {
-			userStart = strings.Index(respStr, "<tt:User>")
-		}
+		userStart := findTagOpen(respStr, "User")
 		if userStart == -1 {
 			break
 		}
 
-		userEnd := strings.Index(respStr[userStart:], "</tds:User>")
-		if userEnd == -1 {
-			userEnd = strings.Index(respStr[userStart:], "</tt:User>")
-		}
+		userEnd := findTagClose(respStr[userStart:], "User")
 		if userEnd == -1 {
 			break
 		}
@@ -65,37 +58,20 @@ func (c *Client) GetUsers(camera *Camera) ([]User, error) {
 		userXML := respStr[userStart : userStart+userEnd]
 		var user User
 
-		// Extract username
-		if start := strings.Index(userXML, "<tds:Username>"); start != -1 {
-			start += len("<tds:Username>")
-			if end := strings.Index(userXML[start:], "</tds:Username>"); end != -1 {
-				user.Username = userXML[start : start+end]
-			}
-		} else if start := strings.Index(userXML, "<tt:Username>"); start != -1 {
-			start += len("<tt:Username>")
-			if end := strings.Index(userXML[start:], "</tt:Username>"); end != -1 {
-				user.Username = userXML[start : start+end]
-			}
-		}
-
-		// Extract user level
-		if start := strings.Index(userXML, "<tds:UserLevel>"); start != -1 {
-			start += len("<tds:UserLevel>")
-			if end := strings.Index(userXML[start:], "</tds:UserLevel>"); end != -1 {
-				user.UserLevel = UserLevel(userXML[start : start+end])
-			}
-		} else if start := strings.Index(userXML, "<tt:UserLevel>"); start != -1 {
-			start += len("<tt:UserLevel>")
-			if end := strings.Index(userXML[start:], "</tt:UserLevel>"); end != -1 {
-				user.UserLevel = UserLevel(userXML[start : start+end])
-			}
-		}
+		user.Username = extractBetweenTags(userXML, "Username")
+		user.UserLevel = UserLevel(extractBetweenTags(userXML, "UserLevel"))
 
 		if user.Username != "" {
 			users = append(users, user)
 		}
 
 		respStr = respStr[userStart+userEnd:]
+	}
+
+	// If the response contains Username elements but we extracted nothing,
+	// parsing failed rather than the camera having no users
+	if len(users) == 0 && strings.Contains(string(resp), "Username>") {
+		return nil, fmt.Errorf("failed to parse GetUsers response")
 	}
 
 	return users, nil
@@ -243,13 +219,26 @@ func escapeXML(s string) string {
 	return s
 }
 
+// containsSOAPFault checks if the response contains a SOAP fault element
+// with any namespace prefix (e.g. s:Fault, SOAP-ENV:Fault, env:Fault, soap:Fault)
+func containsSOAPFault(resp string) bool {
+	// Check for Fault element with any namespace prefix or no prefix
+	if strings.Contains(resp, ":Fault>") || strings.Contains(resp, ":Fault ") {
+		return true
+	}
+	if strings.Contains(resp, "<Fault>") || strings.Contains(resp, "<Fault ") {
+		return true
+	}
+	return false
+}
+
 // parseSOAPFault checks for SOAP faults and returns a descriptive error
 func parseSOAPFault(resp []byte) error {
-	if !bytes.Contains(resp, []byte("SOAP-ENV:Fault")) && !bytes.Contains(resp, []byte("s:Fault")) {
+	respStr := string(resp)
+
+	if !containsSOAPFault(respStr) {
 		return nil
 	}
-
-	respStr := string(resp)
 
 	// Check for common ONVIF-specific fault codes
 	if strings.Contains(respStr, "ter:UsernameClash") {
@@ -271,22 +260,15 @@ func parseSOAPFault(resp []byte) error {
 		return fmt.Errorf("not authorized")
 	}
 
-	// Try to extract fault reason
-	if start := strings.Index(respStr, "<env:Reason>"); start != -1 {
-		if end := strings.Index(respStr[start:], "</env:Reason>"); end != -1 {
-			reason := respStr[start : start+end]
-			if textStart := strings.Index(reason, "<env:Text"); textStart != -1 {
-				if textEnd := strings.Index(reason[textStart:], ">"); textEnd != -1 {
-					textStart = textStart + textEnd + 1
-					if textEndTag := strings.Index(reason[textStart:], "</env:Text>"); textEndTag != -1 {
-						return fmt.Errorf("SOAP fault: %s", reason[textStart:textStart+textEndTag])
-					}
-				}
-			}
+	// Try to extract fault reason text (with any namespace prefix)
+	// Look for Reason > Text pattern used in SOAP 1.2
+	if reason := extractBetweenTags(respStr, "Reason"); reason != "" {
+		if text := extractTextElement(reason); text != "" {
+			return fmt.Errorf("SOAP fault: %s", text)
 		}
 	}
 
-	// Try alternative fault structure
+	// Try SOAP 1.1 faultstring
 	if start := strings.Index(respStr, "<faultstring>"); start != -1 {
 		start += len("<faultstring>")
 		if end := strings.Index(respStr[start:], "</faultstring>"); end != -1 {
@@ -295,4 +277,146 @@ func parseSOAPFault(resp []byte) error {
 	}
 
 	return fmt.Errorf("SOAP fault in response")
+}
+
+// extractBetweenTags finds content between opening and closing tags with any namespace prefix
+func extractBetweenTags(s, localName string) string {
+	// Find opening tag with any prefix (e.g. <env:Reason>, <s:Reason>, <Reason>)
+	openIdx := -1
+	searchPatterns := []string{
+		"<" + localName + ">",
+		"<" + localName + " ",
+	}
+
+	for _, pattern := range searchPatterns {
+		if idx := strings.Index(s, pattern); idx != -1 {
+			openIdx = idx
+			break
+		}
+	}
+
+	// Try with namespace prefix: look for :<localName>
+	if openIdx == -1 {
+		marker := ":" + localName + ">"
+		if idx := strings.Index(s, marker); idx != -1 {
+			// Walk back to find the '<'
+			for i := idx - 1; i >= 0 && i > idx-20; i-- {
+				if s[i] == '<' {
+					openIdx = i
+					break
+				}
+			}
+		}
+	}
+
+	if openIdx == -1 {
+		return ""
+	}
+
+	// Find the end of the opening tag
+	contentStart := strings.Index(s[openIdx:], ">")
+	if contentStart == -1 {
+		return ""
+	}
+	contentStart += openIdx + 1
+
+	// Find closing tag with any prefix
+	closeMarker := ":" + localName + ">"
+	closeIdx := strings.Index(s[contentStart:], closeMarker)
+	if closeIdx == -1 {
+		closeMarker = "</" + localName + ">"
+		closeIdx = strings.Index(s[contentStart:], closeMarker)
+	}
+	if closeIdx == -1 {
+		return ""
+	}
+
+	return s[contentStart : contentStart+closeIdx]
+}
+
+// findTagOpen finds the start of an opening XML tag with any namespace prefix
+func findTagOpen(s, localName string) int {
+	// Try with namespace prefix: <prefix:Name> or <prefix:Name ...>
+	marker := ":" + localName + ">"
+	if idx := strings.Index(s, marker); idx != -1 {
+		for i := idx - 1; i >= 0 && i > idx-20; i-- {
+			if s[i] == '<' && (i+1 >= len(s) || s[i+1] != '/') {
+				return i
+			}
+		}
+	}
+	marker = ":" + localName + " "
+	if idx := strings.Index(s, marker); idx != -1 {
+		for i := idx - 1; i >= 0 && i > idx-20; i-- {
+			if s[i] == '<' && (i+1 >= len(s) || s[i+1] != '/') {
+				return i
+			}
+		}
+	}
+	// Try without prefix
+	for _, pattern := range []string{"<" + localName + ">", "<" + localName + " "} {
+		if idx := strings.Index(s, pattern); idx != -1 {
+			return idx
+		}
+	}
+	return -1
+}
+
+// findTagClose finds the end of a closing XML tag with any namespace prefix,
+// returning offset from the start of the search string
+func findTagClose(s, localName string) int {
+	// Try with namespace prefix: </prefix:Name>
+	marker := ":" + localName + ">"
+	for i := 0; i < len(s); {
+		idx := strings.Index(s[i:], marker)
+		if idx == -1 {
+			break
+		}
+		pos := i + idx
+		// Walk back to find '</'
+		for j := pos - 1; j >= 0 && j > pos-20; j-- {
+			if s[j] == '<' && j+1 < len(s) && s[j+1] == '/' {
+				return pos + len(marker)
+			}
+		}
+		i = pos + len(marker)
+	}
+	// Try without prefix
+	closeTag := "</" + localName + ">"
+	if idx := strings.Index(s, closeTag); idx != -1 {
+		return idx + len(closeTag)
+	}
+	return -1
+}
+
+// extractTextElement extracts text content from a Text element (SOAP 1.2 fault reason)
+func extractTextElement(s string) string {
+	// Find <*:Text ...>content</*:Text> or <Text>content</Text>
+	textStart := -1
+	for _, marker := range []string{":Text ", ":Text>", "<Text ", "<Text>"} {
+		if idx := strings.Index(s, marker); idx != -1 {
+			textStart = idx
+			break
+		}
+	}
+	if textStart == -1 {
+		return ""
+	}
+
+	// Find end of opening tag
+	contentStart := strings.Index(s[textStart:], ">")
+	if contentStart == -1 {
+		return ""
+	}
+	contentStart += textStart + 1
+
+	// Find closing tag
+	for _, closeMarker := range []string{":Text>", "</Text>"} {
+		closeTag := "</" + closeMarker
+		if idx := strings.Index(s[contentStart:], closeTag); idx != -1 {
+			return s[contentStart : contentStart+idx]
+		}
+	}
+
+	return ""
 }

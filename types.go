@@ -37,6 +37,10 @@ type Camera struct {
 	RelayOutputs     int
 	PTZSupport       bool
 	AnalyticsSupport bool
+
+	// Service URLs discovered from GetCapabilities
+	MediaURL   string
+	ImagingURL string
 }
 
 // StreamConfig represents a video stream configuration
@@ -66,11 +70,29 @@ type VideoEncoderConfig struct {
 	ProfileName      string
 }
 
+// UserLevel represents the access level for an ONVIF user
+type UserLevel string
+
+const (
+	UserLevelAdministrator UserLevel = "Administrator"
+	UserLevelOperator      UserLevel = "Operator"
+	UserLevelUser          UserLevel = "User"
+	UserLevelAnonymous     UserLevel = "Anonymous"
+)
+
+// User represents an ONVIF user account
+type User struct {
+	Username  string
+	Password  string
+	UserLevel UserLevel
+}
+
 // Client represents an ONVIF client with authentication
 type Client struct {
-	Username string
-	Password string
-	Timeout  time.Duration
+	Username    string
+	Password    string
+	Timeout     time.Duration
+	InsecureTLS bool // Skip TLS certificate verification
 }
 
 // DiscoveryOptions provides options for camera discovery
@@ -80,6 +102,28 @@ type DiscoveryOptions struct {
 	FetchDetails    bool // Whether to fetch device information during discovery
 	FetchHostname   bool
 	FetchCapabilities bool
+}
+
+// IrCutFilterMode represents the IR cut filter (day/night) mode
+type IrCutFilterMode string
+
+const (
+	IrCutFilterOn   IrCutFilterMode = "ON"
+	IrCutFilterOff  IrCutFilterMode = "OFF"
+	IrCutFilterAuto IrCutFilterMode = "AUTO"
+)
+
+// ImagingSettings represents imaging configuration for a video source
+type ImagingSettings struct {
+	VideoSourceToken string
+	IrCutFilter      IrCutFilterMode
+}
+
+// OSDConfig represents an On-Screen Display configuration
+type OSDConfig struct {
+	Token            string
+	Type             string // "Text", "Image", "DateAndTime"
+	VideoSourceToken string
 }
 
 // StreamUpdateConfig specifies target configuration for stream updates

@@ -11,9 +11,11 @@ import (
 
 func main() {
 	var username, password string
+	var insecure bool
 
 	flag.StringVar(&username, "user", "", "ONVIF username (required)")
 	flag.StringVar(&password, "pass", "", "ONVIF password (required)")
+	flag.BoolVar(&insecure, "insecure", false, "Skip TLS certificate verification")
 	flag.Parse()
 
 	if username == "" || password == "" {
@@ -29,6 +31,7 @@ func main() {
 
 	// Create client
 	client := onvif.NewClient(username, password)
+	client.InsecureTLS = insecure
 
 	// Discover cameras
 	cameras, err := onvif.DiscoverCameras(nil)

@@ -9,13 +9,11 @@ import (
 
 // GetStreamProfiles fetches all stream profiles for a camera
 func (c *Client) GetStreamProfiles(camera *Camera) ([]StreamConfig, error) {
-	address := getFirstAddress(camera.Address)
-
-	// Convert device service URL to media service URL
-	mediaURL := strings.Replace(address, "/device_service", "/media_service", 1)
-	if !strings.Contains(mediaURL, "media_service") {
-		mediaURL = strings.Replace(address, "/onvif/device_service", "/onvif/media_service", 1)
+	// Discover service URLs if not already cached
+	if camera.MediaURL == "" {
+		c.GetCapabilities(camera)
 	}
+	mediaURL := resolveMediaURL(camera)
 
 	// Get profiles
 	profilesBody := `<trt:GetProfiles/>`
@@ -117,15 +115,71 @@ func (c *Client) GetStreamProfiles(camera *Camera) ([]StreamConfig, error) {
 	return streamConfigs, nil
 }
 
-// UpdateStreamConfiguration updates a stream's video encoder configuration
-func (c *Client) UpdateStreamConfiguration(camera *Camera, encoderToken string, config StreamUpdateConfig) error {
+// resolveMediaURL returns the media service URL for a camera.
+// Uses the discovered URL from GetCapabilities if available, otherwise
+// falls back to path replacement on the device service address.
+func resolveMediaURL(camera *Camera) string {
+	if camera.MediaURL != "" {
+		return camera.MediaURL
+	}
 	address := getFirstAddress(camera.Address)
-
-	// Convert device service URL to media service URL
 	mediaURL := strings.Replace(address, "/device_service", "/media_service", 1)
 	if !strings.Contains(mediaURL, "media_service") {
 		mediaURL = strings.Replace(address, "/onvif/device_service", "/onvif/media_service", 1)
 	}
+	return mediaURL
+}
+
+// GetStreamUri retrieves the RTSP stream URI for a given profile token
+func (c *Client) GetStreamUri(camera *Camera, profileToken string) (string, error) {
+	if camera.MediaURL == "" {
+		c.GetCapabilities(camera)
+	}
+	mediaURL := resolveMediaURL(camera)
+
+	body := fmt.Sprintf(`<trt:GetStreamUri>
+		<trt:StreamSetup>
+			<tt:Stream xmlns:tt="http://www.onvif.org/ver10/schema">RTP-Unicast</tt:Stream>
+			<tt:Transport xmlns:tt="http://www.onvif.org/ver10/schema">
+				<tt:Protocol>RTSP</tt:Protocol>
+			</tt:Transport>
+		</trt:StreamSetup>
+		<trt:ProfileToken>%s</trt:ProfileToken>
+	</trt:GetStreamUri>`, profileToken)
+
+	resp, err := c.sendSOAPRequest(mediaURL,
+		"http://www.onvif.org/ver10/media/wsdl/GetStreamUri", body)
+	if err != nil {
+		return "", fmt.Errorf("failed to get stream URI: %v", err)
+	}
+
+	if err := parseSOAPFault(resp); err != nil {
+		return "", err
+	}
+
+	// Try structured parsing
+	type StreamUriResponse struct {
+		MediaUri struct {
+			Uri string `xml:"Uri"`
+		} `xml:"Body>GetStreamUriResponse>MediaUri"`
+	}
+
+	var streamUri StreamUriResponse
+	if err := xml.Unmarshal(resp, &streamUri); err == nil && streamUri.MediaUri.Uri != "" {
+		return streamUri.MediaUri.Uri, nil
+	}
+
+	// Fallback to string extraction
+	if uri := extractBetweenTags(string(resp), "Uri"); uri != "" {
+		return uri, nil
+	}
+
+	return "", fmt.Errorf("no stream URI found in response")
+}
+
+// UpdateStreamConfiguration updates a stream's video encoder configuration
+func (c *Client) UpdateStreamConfiguration(camera *Camera, encoderToken string, config StreamUpdateConfig) error {
+	mediaURL := resolveMediaURL(camera)
 
 	// Set video encoder configuration
 	setConfigBody := fmt.Sprintf(`

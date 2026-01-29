@@ -220,6 +220,25 @@ func (c *Client) SetSystemDateTime(camera *Camera) error {
 	return nil
 }
 
+// SetHostname sets the device hostname
+func (c *Client) SetHostname(camera *Camera, name string) error {
+	address := getFirstAddress(camera.Address)
+
+	body := fmt.Sprintf(`<tds:SetHostname><tds:Name>%s</tds:Name></tds:SetHostname>`, name)
+	resp, err := c.sendSOAPRequest(address,
+		"http://www.onvif.org/ver10/device/wsdl/SetHostname", body)
+	if err != nil {
+		return fmt.Errorf("failed to set hostname: %v", err)
+	}
+
+	if err := parseSOAPFault(resp); err != nil {
+		return err
+	}
+
+	camera.Hostname = name
+	return nil
+}
+
 // GetCapabilities fetches device capabilities
 func (c *Client) GetCapabilities(camera *Camera) error {
 	address := getFirstAddress(camera.Address)
@@ -237,14 +256,20 @@ func (c *Client) GetCapabilities(camera *Camera) error {
 		// Check for Analytics support
 		camera.AnalyticsSupport = strings.Contains(respStr, "Analytics>") && strings.Contains(respStr, "XAddr")
 
-		// Parse media capabilities
+		// Parse capabilities including service URLs
 		type CapabilitiesResponse struct {
 			Media struct {
-				VideoSources int `xml:"VideoSources,attr"`
-				VideoOutputs int `xml:"VideoOutputs,attr"`
-				AudioSources int `xml:"AudioSources,attr"`
-				AudioOutputs int `xml:"AudioOutputs,attr"`
-			} `xml:"Body>GetCapabilitiesResponse>Capabilities>Media>StreamingCapabilities"`
+				XAddr            string `xml:"XAddr"`
+				StreamingCaps    struct {
+					VideoSources int `xml:"VideoSources,attr"`
+					VideoOutputs int `xml:"VideoOutputs,attr"`
+					AudioSources int `xml:"AudioSources,attr"`
+					AudioOutputs int `xml:"AudioOutputs,attr"`
+				} `xml:"StreamingCapabilities"`
+			} `xml:"Body>GetCapabilitiesResponse>Capabilities>Media"`
+			Imaging struct {
+				XAddr string `xml:"XAddr"`
+			} `xml:"Body>GetCapabilitiesResponse>Capabilities>Extension>Imaging"`
 			Device struct {
 				IO struct {
 					RelayOutputs int `xml:"RelayOutputs,attr"`
@@ -254,13 +279,47 @@ func (c *Client) GetCapabilities(camera *Camera) error {
 
 		var capabilities CapabilitiesResponse
 		if xml.Unmarshal(capabilitiesResp, &capabilities) == nil {
-			camera.VideoSources = capabilities.Media.VideoSources
-			camera.VideoOutputs = capabilities.Media.VideoOutputs
-			camera.AudioSources = capabilities.Media.AudioSources
-			camera.AudioOutputs = capabilities.Media.AudioOutputs
+			camera.VideoSources = capabilities.Media.StreamingCaps.VideoSources
+			camera.VideoOutputs = capabilities.Media.StreamingCaps.VideoOutputs
+			camera.AudioSources = capabilities.Media.StreamingCaps.AudioSources
+			camera.AudioOutputs = capabilities.Media.StreamingCaps.AudioOutputs
 			camera.RelayOutputs = capabilities.Device.IO.RelayOutputs
+			if capabilities.Media.XAddr != "" {
+				camera.MediaURL = capabilities.Media.XAddr
+			}
+			if capabilities.Imaging.XAddr != "" {
+				camera.ImagingURL = capabilities.Imaging.XAddr
+			}
+		}
+
+		// Fallback: extract service URLs from response string
+		if camera.MediaURL == "" {
+			if xaddr := extractServiceXAddr(respStr, "Media"); xaddr != "" {
+				camera.MediaURL = xaddr
+			}
+		}
+		if camera.ImagingURL == "" {
+			if xaddr := extractServiceXAddr(respStr, "Imaging"); xaddr != "" {
+				camera.ImagingURL = xaddr
+			}
 		}
 	}
 
 	return nil
+}
+
+// extractServiceXAddr finds the XAddr URL within a service section of a capabilities response.
+// It looks for a section like <tt:Media><tt:XAddr>http://...</tt:XAddr></tt:Media>
+func extractServiceXAddr(respStr, serviceName string) string {
+	// Find the service section (with any namespace prefix)
+	sectionStart := findTagOpen(respStr, serviceName)
+	if sectionStart == -1 {
+		return ""
+	}
+	sectionEnd := findTagClose(respStr[sectionStart:], serviceName)
+	if sectionEnd == -1 {
+		return ""
+	}
+	section := respStr[sectionStart : sectionStart+sectionEnd]
+	return extractBetweenTags(section, "XAddr")
 }
