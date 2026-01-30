@@ -45,25 +45,16 @@ func (c *Client) sendSOAPRequest(endpoint, action, body string) ([]byte, error) 
 		</Security>`, c.Username, digest, nonce, created)
 	}
 
-	// Determine namespace based on service
-	var namespace string
-	if strings.Contains(endpoint, "device_service") {
-		namespace = "tds=\"http://www.onvif.org/ver10/device/wsdl\""
-	} else if strings.Contains(endpoint, "media_service") {
-		namespace = "trt=\"http://www.onvif.org/ver10/media/wsdl\""
-	} else if strings.Contains(endpoint, "imaging") {
-		namespace = "timg=\"http://www.onvif.org/ver20/imaging/wsdl\""
-	} else if strings.Contains(endpoint, "media2") {
-		namespace = "tr2=\"http://www.onvif.org/ver20/media/wsdl\""
-	} else {
-		namespace = "tds=\"http://www.onvif.org/ver10/device/wsdl\""
-	}
-
 	soapRequest := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:%s>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+            xmlns:tds="http://www.onvif.org/ver10/device/wsdl"
+            xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
+            xmlns:tt="http://www.onvif.org/ver10/schema"
+            xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"
+            xmlns:tr2="http://www.onvif.org/ver20/media/wsdl">
 	<s:Header>%s</s:Header>
 	<s:Body>%s</s:Body>
-</s:Envelope>`, namespace, authHeader, body)
+</s:Envelope>`, authHeader, body)
 
 	req, err := http.NewRequest("POST", endpoint, bytes.NewBufferString(soapRequest))
 	if err != nil {
