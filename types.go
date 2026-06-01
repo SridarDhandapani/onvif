@@ -38,8 +38,9 @@ type Camera struct {
 	PTZSupport       bool
 	AnalyticsSupport bool
 
-	// Service URLs discovered from GetCapabilities
+	// Service URLs discovered from GetCapabilities / GetServices
 	MediaURL   string
+	Media2URL  string
 	ImagingURL string
 }
 
@@ -47,6 +48,7 @@ type Camera struct {
 type StreamConfig struct {
 	ProfileName  string
 	ProfileToken string
+	EncoderToken string // VideoEncoderConfiguration token (for updates)
 	Resolution   string
 	Framerate    int
 	Bitrate      int
@@ -68,6 +70,19 @@ type VideoEncoderConfig struct {
 	Quality          float32
 	ProfileToken     string
 	ProfileName      string
+}
+
+// VideoSourceMode represents a sensor capture mode: the resolution (and thus
+// aspect ratio), max framerate and supported encodings, selected by token.
+type VideoSourceMode struct {
+	Token        string
+	Enabled      bool
+	MaxFramerate float64
+	Width        int
+	Height       int
+	Encodings    string // space-separated, e.g. "H264 H265"
+	Reboot       bool   // selecting this mode requires a reboot
+	Description  string
 }
 
 // UserLevel represents the access level for an ONVIF user

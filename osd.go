@@ -17,8 +17,7 @@ func getMedia2URL(address string) string {
 
 // GetOSDs retrieves all OSD (On-Screen Display) configurations from the camera
 func (c *Client) GetOSDs(camera *Camera) ([]OSDConfig, error) {
-	address := getFirstAddress(camera.Address)
-	media2URL := getMedia2URL(address)
+	media2URL := c.resolveMedia2URL(camera)
 
 	body := `<tr2:GetOSDs/>`
 	resp, err := c.sendSOAPRequest(media2URL,
@@ -32,25 +31,35 @@ func (c *Client) GetOSDs(camera *Camera) ([]OSDConfig, error) {
 	}
 
 	// Try structured parsing
+	// The ONVIF schema names the repeated response element "OSDs" (both Media1
+	// ver10 and Media2 ver20); accept the singular "OSD" too for leniency.
+	type osdEntry struct {
+		Token            string `xml:"token,attr"`
+		VideoSourceToken string `xml:"VideoSourceConfigurationToken"`
+		Type             string `xml:"Type"`
+	}
 	type OSDsResponse struct {
-		OSDs []struct {
-			Token            string `xml:"token,attr"`
-			VideoSourceToken string `xml:"VideoSourceConfigurationToken"`
-			Type             string `xml:"Type"`
-		} `xml:"Body>GetOSDsResponse>OSD"`
+		OSDs    []osdEntry `xml:"Body>GetOSDsResponse>OSDs"`
+		OSDsAlt []osdEntry `xml:"Body>GetOSDsResponse>OSD"`
 	}
 
 	var osdsResp OSDsResponse
-	if err := xml.Unmarshal(resp, &osdsResp); err == nil && len(osdsResp.OSDs) > 0 {
-		var configs []OSDConfig
-		for _, osd := range osdsResp.OSDs {
-			configs = append(configs, OSDConfig{
-				Token:            osd.Token,
-				Type:             osd.Type,
-				VideoSourceToken: osd.VideoSourceToken,
-			})
+	if err := xml.Unmarshal(resp, &osdsResp); err == nil {
+		entries := osdsResp.OSDs
+		if len(entries) == 0 {
+			entries = osdsResp.OSDsAlt
 		}
-		return configs, nil
+		if len(entries) > 0 {
+			var configs []OSDConfig
+			for _, osd := range entries {
+				configs = append(configs, OSDConfig{
+					Token:            osd.Token,
+					Type:             osd.Type,
+					VideoSourceToken: osd.VideoSourceToken,
+				})
+			}
+			return configs, nil
+		}
 	}
 
 	// Fallback: extract tokens from response string
@@ -80,8 +89,7 @@ func (c *Client) GetOSDs(camera *Camera) ([]OSDConfig, error) {
 
 // DeleteOSD removes an OSD configuration by token
 func (c *Client) DeleteOSD(camera *Camera, osdToken string) error {
-	address := getFirstAddress(camera.Address)
-	media2URL := getMedia2URL(address)
+	media2URL := c.resolveMedia2URL(camera)
 
 	body := fmt.Sprintf(`<tr2:DeleteOSD>
 		<tr2:OSDToken>%s</tr2:OSDToken>

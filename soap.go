@@ -92,10 +92,42 @@ func (c *Client) sendSOAPRequest(endpoint, action, body string) ([]byte, error) 
 		if len(respBody) == 0 {
 			return nil, fmt.Errorf("HTTP %d with empty response", resp.StatusCode)
 		}
-		return respBody, fmt.Errorf("HTTP %d: %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+		// gSOAP-based devices (e.g. Reolink) return a SOAP fault with the real
+		// reason in the body even on HTTP errors. Surface the fault Subcode and
+		// Reason; fall back to a flattened body snippet if it isn't a fault.
+		detail := faultDetail(respBody)
+		if detail == "" {
+			detail = strings.Join(strings.Fields(string(respBody)), " ")
+			if len(detail) > 400 {
+				detail = detail[:400]
+			}
+		}
+		return respBody, fmt.Errorf("HTTP %d (%s): %s", resp.StatusCode, http.StatusText(resp.StatusCode), detail)
 	}
 
 	return respBody, nil
+}
+
+// faultDetail extracts a human-readable reason from a SOAP fault body: the
+// fault Subcode value (e.g. "ter:InvalidArgVal") and/or the Reason text. It
+// returns "" if the body is not a recognisable SOAP fault.
+func faultDetail(resp []byte) string {
+	s := string(resp)
+	if !containsSOAPFault(s) {
+		return ""
+	}
+	var parts []string
+	if sub := extractBetweenTags(s, "Subcode"); sub != "" {
+		if v := extractBetweenTags(sub, "Value"); v != "" {
+			parts = append(parts, strings.TrimSpace(v))
+		}
+	}
+	if reason := extractBetweenTags(s, "Reason"); reason != "" {
+		if t := extractTextElement(reason); t != "" {
+			parts = append(parts, strings.TrimSpace(t))
+		}
+	}
+	return strings.Join(parts, ": ")
 }
 
 // getFirstAddress extracts the first address if multiple are provided

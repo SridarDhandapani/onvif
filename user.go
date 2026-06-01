@@ -281,57 +281,60 @@ func parseSOAPFault(resp []byte) error {
 
 // extractBetweenTags finds content between opening and closing tags with any namespace prefix
 func extractBetweenTags(s, localName string) string {
-	// Find opening tag with any prefix (e.g. <env:Reason>, <s:Reason>, <Reason>)
-	openIdx := -1
-	searchPatterns := []string{
-		"<" + localName + ">",
-		"<" + localName + " ",
-	}
-
-	for _, pattern := range searchPatterns {
-		if idx := strings.Index(s, pattern); idx != -1 {
-			openIdx = idx
+	// Find the opening tag, matching any namespace prefix and ignoring
+	// attributes: <localName>, <localName ...>, <prefix:localName>,
+	// <prefix:localName ...>. Scan '<' boundaries and compare the de-prefixed
+	// tag name, skipping closing tags, declarations and comments.
+	contentStart := -1
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] != '<' || s[i+1] == '/' || s[i+1] == '?' || s[i+1] == '!' {
+			continue
+		}
+		gt := strings.Index(s[i:], ">")
+		if gt == -1 {
+			return ""
+		}
+		if matchLocalName(s[i+1:i+gt], localName) {
+			contentStart = i + gt + 1
 			break
 		}
 	}
-
-	// Try with namespace prefix: look for :<localName>
-	if openIdx == -1 {
-		marker := ":" + localName + ">"
-		if idx := strings.Index(s, marker); idx != -1 {
-			// Walk back to find the '<'
-			for i := idx - 1; i >= 0 && i > idx-20; i-- {
-				if s[i] == '<' {
-					openIdx = i
-					break
-				}
-			}
-		}
-	}
-
-	if openIdx == -1 {
-		return ""
-	}
-
-	// Find the end of the opening tag
-	contentStart := strings.Index(s[openIdx:], ">")
 	if contentStart == -1 {
 		return ""
 	}
-	contentStart += openIdx + 1
 
-	// Find closing tag with any prefix
-	closeMarker := ":" + localName + ">"
-	closeIdx := strings.Index(s[contentStart:], closeMarker)
-	if closeIdx == -1 {
-		closeMarker = "</" + localName + ">"
-		closeIdx = strings.Index(s[contentStart:], closeMarker)
+	// Find the matching closing tag and return the content before it. We must
+	// stop at the '<' that opens the closing tag, not at the ":localName>"
+	// inside it — otherwise a namespaced close tag like </tt:XAddr> leaves a
+	// trailing "</tt" on the extracted value.
+	content := s[contentStart:]
+	for i := 0; i+1 < len(content); i++ {
+		if content[i] != '<' || content[i+1] != '/' {
+			continue
+		}
+		gt := strings.Index(content[i:], ">")
+		if gt == -1 {
+			return ""
+		}
+		if matchLocalName(content[i+2:i+gt], localName) {
+			return content[:i]
+		}
 	}
-	if closeIdx == -1 {
-		return ""
-	}
+	return ""
+}
 
-	return s[contentStart : contentStart+closeIdx]
+// matchLocalName reports whether an XML tag body (the text between '<'/'</' and
+// '>', e.g. `tt:Username Type="x"` or `XAddr`) names the given local element,
+// ignoring any namespace prefix, attributes and a self-closing slash.
+func matchLocalName(tag, localName string) bool {
+	if sp := strings.IndexByte(tag, ' '); sp != -1 {
+		tag = tag[:sp]
+	}
+	tag = strings.TrimSuffix(tag, "/")
+	if c := strings.LastIndex(tag, ":"); c != -1 {
+		tag = tag[c+1:]
+	}
+	return tag == localName
 }
 
 // findTagOpen finds the start of an opening XML tag with any namespace prefix
@@ -391,32 +394,7 @@ func findTagClose(s, localName string) int {
 
 // extractTextElement extracts text content from a Text element (SOAP 1.2 fault reason)
 func extractTextElement(s string) string {
-	// Find <*:Text ...>content</*:Text> or <Text>content</Text>
-	textStart := -1
-	for _, marker := range []string{":Text ", ":Text>", "<Text ", "<Text>"} {
-		if idx := strings.Index(s, marker); idx != -1 {
-			textStart = idx
-			break
-		}
-	}
-	if textStart == -1 {
-		return ""
-	}
-
-	// Find end of opening tag
-	contentStart := strings.Index(s[textStart:], ">")
-	if contentStart == -1 {
-		return ""
-	}
-	contentStart += textStart + 1
-
-	// Find closing tag
-	for _, closeMarker := range []string{":Text>", "</Text>"} {
-		closeTag := "</" + closeMarker
-		if idx := strings.Index(s[contentStart:], closeTag); idx != -1 {
-			return s[contentStart : contentStart+idx]
-		}
-	}
-
-	return ""
+	// <Text>...</Text> or <prefix:Text xml:lang="en">...</prefix:Text>.
+	// extractBetweenTags handles namespace prefixes and attributes.
+	return extractBetweenTags(s, "Text")
 }

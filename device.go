@@ -181,13 +181,16 @@ func (c *Client) SetSystemDateTime(camera *Camera) error {
 	address := getFirstAddress(camera.Address)
 	now := time.Now().UTC()
 
+	// TimeZone is intentionally omitted: per the ONVIF spec it is optional, and
+	// when absent the device keeps its configured timezone and simply applies
+	// the supplied UTC time — which is all this call needs (clock sync). Some
+	// devices (e.g. Reolink) reject the request with ter:InvalidArgVal when sent
+	// a TZ value they consider malformed, so not sending one is both correct and
+	// the most widely compatible.
 	setDateTimeBody := fmt.Sprintf(`
 	<tds:SetSystemDateAndTime>
 		<tds:DateTimeType>Manual</tds:DateTimeType>
 		<tds:DaylightSavings>false</tds:DaylightSavings>
-		<tds:TimeZone>
-			<tt:TZ xmlns:tt="http://www.onvif.org/ver10/schema">GMT0</tt:TZ>
-		</tds:TimeZone>
 		<tds:UTCDateTime>
 			<tt:Time xmlns:tt="http://www.onvif.org/ver10/schema">
 				<tt:Hour>%d</tt:Hour>
@@ -306,6 +309,64 @@ func (c *Client) GetCapabilities(camera *Camera) error {
 	}
 
 	return nil
+}
+
+// GetServices queries the device service for the endpoint (XAddr) of every
+// ONVIF service it exposes and records the ones we use. Unlike GetCapabilities,
+// GetServices reliably reports the Media2 service, and reports each service's
+// real host/port/path — important for cameras (e.g. Reolink) that serve ONVIF
+// services on a non-default port and distinct paths.
+func (c *Client) GetServices(camera *Camera) error {
+	address := getFirstAddress(camera.Address)
+
+	body := `<tds:GetServices><tds:IncludeCapability>false</tds:IncludeCapability></tds:GetServices>`
+	resp, err := c.sendSOAPRequest(address,
+		"http://www.onvif.org/ver10/device/wsdl/GetServices", body)
+	if err != nil {
+		return fmt.Errorf("failed to get services: %v", err)
+	}
+	if err := parseSOAPFault(resp); err != nil {
+		return err
+	}
+
+	var parsed struct {
+		Services []struct {
+			Namespace string `xml:"Namespace"`
+			XAddr     string `xml:"XAddr"`
+		} `xml:"Body>GetServicesResponse>Service"`
+	}
+	if err := xml.Unmarshal(resp, &parsed); err != nil {
+		return fmt.Errorf("failed to parse services: %v", err)
+	}
+
+	for _, s := range parsed.Services {
+		switch strings.TrimSpace(s.Namespace) {
+		case "http://www.onvif.org/ver20/media/wsdl":
+			camera.Media2URL = s.XAddr
+		case "http://www.onvif.org/ver10/media/wsdl":
+			if camera.MediaURL == "" {
+				camera.MediaURL = s.XAddr
+			}
+		case "http://www.onvif.org/ver20/imaging/wsdl":
+			if camera.ImagingURL == "" {
+				camera.ImagingURL = s.XAddr
+			}
+		}
+	}
+	return nil
+}
+
+// resolveMedia2URL returns the Media2 service URL, discovering it via
+// GetServices when not already known and falling back to a heuristic rewrite of
+// the device-service address.
+func (c *Client) resolveMedia2URL(camera *Camera) string {
+	if camera.Media2URL == "" {
+		_ = c.GetServices(camera) // best-effort; populates Media2URL when available
+	}
+	if camera.Media2URL != "" {
+		return camera.Media2URL
+	}
+	return getMedia2URL(getFirstAddress(camera.Address))
 }
 
 // extractServiceXAddr finds the XAddr URL within a service section of a capabilities response.
