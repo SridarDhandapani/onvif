@@ -6,12 +6,9 @@ import (
 	"strings"
 )
 
-// resolveImagingURL returns the imaging service URL for a camera.
-func resolveImagingURL(camera *Camera) string {
-	if camera.ImagingURL != "" {
-		return camera.ImagingURL
-	}
-	address := getFirstAddress(camera.Address)
+// imagingURLHeuristic derives a likely Imaging service URL from the
+// device-service address. Used only when service discovery reported none.
+func imagingURLHeuristic(address string) string {
 	url := strings.Replace(address, "/device_service", "/imaging", 1)
 	if !strings.Contains(url, "imaging") {
 		url = strings.Replace(address, "/onvif/device_service", "/onvif/imaging", 1)
@@ -21,10 +18,7 @@ func resolveImagingURL(camera *Camera) string {
 
 // getVideoSourceToken retrieves the first video source token from media profiles
 func (c *Client) getVideoSourceToken(camera *Camera) (string, error) {
-	if camera.MediaURL == "" {
-		c.GetCapabilities(camera)
-	}
-	mediaURL := resolveMediaURL(camera)
+	mediaURL := c.resolveMediaURL(camera)
 
 	body := `<trt:GetVideoSources/>`
 	resp, err := c.sendSOAPRequest(mediaURL,
@@ -32,35 +26,22 @@ func (c *Client) getVideoSourceToken(camera *Camera) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to get video sources: %v", err)
 	}
+	if err := parseSOAPFault(resp); err != nil {
+		return "", err
+	}
 
-	// Try structured parsing
-	type VideoSourcesResponse struct {
+	var sourcesResp struct {
 		VideoSources []struct {
 			Token string `xml:"token,attr"`
 		} `xml:"Body>GetVideoSourcesResponse>VideoSources"`
 	}
-
-	var sourcesResp VideoSourcesResponse
-	if err := xml.Unmarshal(resp, &sourcesResp); err == nil && len(sourcesResp.VideoSources) > 0 {
-		return sourcesResp.VideoSources[0].Token, nil
+	if err := xml.Unmarshal(resp, &sourcesResp); err != nil {
+		return "", fmt.Errorf("failed to parse video sources: %v", err)
 	}
-
-	// Fallback: extract token from response
-	token := extractBetweenTags(string(resp), "token")
-	if token != "" {
-		return token, nil
+	if len(sourcesResp.VideoSources) == 0 {
+		return "", fmt.Errorf("no video source token found")
 	}
-
-	// Look for token attribute in VideoSources element
-	respStr := string(resp)
-	if idx := strings.Index(respStr, "token=\""); idx != -1 {
-		start := idx + len("token=\"")
-		if end := strings.Index(respStr[start:], "\""); end != -1 {
-			return respStr[start : start+end], nil
-		}
-	}
-
-	return "", fmt.Errorf("no video source token found")
+	return sourcesResp.VideoSources[0].Token, nil
 }
 
 // GetImagingSettings retrieves the current imaging settings for the camera's video source
@@ -70,10 +51,7 @@ func (c *Client) GetImagingSettings(camera *Camera) (*ImagingSettings, error) {
 		return nil, err
 	}
 
-	if camera.ImagingURL == "" {
-		c.GetCapabilities(camera)
-	}
-	imagingURL := resolveImagingURL(camera)
+	imagingURL := c.resolveImagingURL(camera)
 
 	body := fmt.Sprintf(`<timg:GetImagingSettings>
 		<timg:VideoSourceToken>%s</timg:VideoSourceToken>
@@ -99,14 +77,8 @@ func (c *Client) GetImagingSettings(camera *Camera) (*ImagingSettings, error) {
 	}
 
 	var imgResp ImagingResponse
-	if err := xml.Unmarshal(resp, &imgResp); err == nil && imgResp.IrCutFilter != "" {
+	if err := xml.Unmarshal(resp, &imgResp); err == nil {
 		settings.IrCutFilter = IrCutFilterMode(imgResp.IrCutFilter)
-		return settings, nil
-	}
-
-	// Fallback to string extraction
-	if filter := extractBetweenTags(string(resp), "IrCutFilter"); filter != "" {
-		settings.IrCutFilter = IrCutFilterMode(filter)
 	}
 
 	return settings, nil
@@ -119,10 +91,7 @@ func (c *Client) SetIrCutFilter(camera *Camera, mode IrCutFilterMode) error {
 		return err
 	}
 
-	if camera.ImagingURL == "" {
-		c.GetCapabilities(camera)
-	}
-	imagingURL := resolveImagingURL(camera)
+	imagingURL := c.resolveImagingURL(camera)
 
 	body := fmt.Sprintf(`<timg:SetImagingSettings>
 		<timg:VideoSourceToken>%s</timg:VideoSourceToken>

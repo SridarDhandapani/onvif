@@ -21,59 +21,23 @@ func (c *Client) GetUsers(camera *Camera) ([]User, error) {
 		return nil, err
 	}
 
-	// Try structured parsing first
-	type GetUsersResponse struct {
+	var usersResp struct {
 		Users []struct {
 			Username  string `xml:"Username"`
 			UserLevel string `xml:"UserLevel"`
 		} `xml:"Body>GetUsersResponse>User"`
 	}
+	if err := xml.Unmarshal(resp, &usersResp); err != nil {
+		return nil, fmt.Errorf("failed to parse GetUsers response: %v", err)
+	}
 
-	var usersResp GetUsersResponse
 	var users []User
-
-	if err := xml.Unmarshal(resp, &usersResp); err == nil && len(usersResp.Users) > 0 {
-		for _, u := range usersResp.Users {
-			users = append(users, User{
-				Username:  u.Username,
-				UserLevel: UserLevel(u.UserLevel),
-			})
-		}
-		return users, nil
+	for _, u := range usersResp.Users {
+		users = append(users, User{
+			Username:  u.Username,
+			UserLevel: UserLevel(u.UserLevel),
+		})
 	}
-
-	// Fallback to manual extraction (namespace-agnostic)
-	respStr := string(resp)
-	for {
-		userStart := findTagOpen(respStr, "User")
-		if userStart == -1 {
-			break
-		}
-
-		userEnd := findTagClose(respStr[userStart:], "User")
-		if userEnd == -1 {
-			break
-		}
-
-		userXML := respStr[userStart : userStart+userEnd]
-		var user User
-
-		user.Username = extractBetweenTags(userXML, "Username")
-		user.UserLevel = UserLevel(extractBetweenTags(userXML, "UserLevel"))
-
-		if user.Username != "" {
-			users = append(users, user)
-		}
-
-		respStr = respStr[userStart+userEnd:]
-	}
-
-	// If the response contains Username elements but we extracted nothing,
-	// parsing failed rather than the camera having no users
-	if len(users) == 0 && strings.Contains(string(resp), "Username>") {
-		return nil, fmt.Errorf("failed to parse GetUsers response")
-	}
-
 	return users, nil
 }
 
@@ -219,182 +183,73 @@ func escapeXML(s string) string {
 	return s
 }
 
-// containsSOAPFault checks if the response contains a SOAP fault element
-// with any namespace prefix (e.g. s:Fault, SOAP-ENV:Fault, env:Fault, soap:Fault)
-func containsSOAPFault(resp string) bool {
-	// Check for Fault element with any namespace prefix or no prefix
-	if strings.Contains(resp, ":Fault>") || strings.Contains(resp, ":Fault ") {
-		return true
-	}
-	if strings.Contains(resp, "<Fault>") || strings.Contains(resp, "<Fault ") {
-		return true
-	}
-	return false
+// soapFault is the structured form of a SOAP 1.1/1.2 fault. Element names are
+// matched by local name, so any namespace prefix (s:, env:, SOAP-ENV:, …) works.
+type soapFault struct {
+	// SOAP 1.2
+	Code struct {
+		Value   string `xml:"Value"`
+		Subcode struct {
+			Value string `xml:"Value"`
+		} `xml:"Subcode"`
+	} `xml:"Code"`
+	Reason struct {
+		Text string `xml:"Text"`
+	} `xml:"Reason"`
+	// SOAP 1.1
+	FaultCode   string `xml:"faultcode"`
+	FaultString string `xml:"faultstring"`
 }
 
-// parseSOAPFault checks for SOAP faults and returns a descriptive error
+// parseSOAPFault returns a descriptive error if resp contains a SOAP fault,
+// otherwise nil. It parses the fault structurally rather than scanning strings.
 func parseSOAPFault(resp []byte) error {
-	respStr := string(resp)
-
-	if !containsSOAPFault(respStr) {
-		return nil
+	var env struct {
+		Fault soapFault `xml:"Body>Fault"`
+	}
+	if err := xml.Unmarshal(resp, &env); err != nil {
+		return nil // not parseable as a fault envelope
 	}
 
-	// Check for common ONVIF-specific fault codes
-	if strings.Contains(respStr, "ter:UsernameClash") {
+	f := env.Fault
+	subcode := strings.TrimSpace(f.Code.Subcode.Value)
+	reason := strings.TrimSpace(f.Reason.Text)
+	if reason == "" {
+		reason = strings.TrimSpace(f.FaultString)
+	}
+	code := subcode
+	if code == "" {
+		code = strings.TrimSpace(f.Code.Value)
+	}
+	if code == "" {
+		code = strings.TrimSpace(f.FaultCode)
+	}
+	if code == "" && reason == "" {
+		return nil // no fault present
+	}
+
+	// Friendly messages for common ONVIF fault subcodes.
+	switch {
+	case strings.Contains(subcode, "UsernameClash"):
 		return fmt.Errorf("username already exists")
-	}
-	if strings.Contains(respStr, "ter:UsernameMissing") {
+	case strings.Contains(subcode, "UsernameMissing"):
 		return fmt.Errorf("username not found")
-	}
-	if strings.Contains(respStr, "ter:TooManyUsers") {
+	case strings.Contains(subcode, "TooManyUsers"):
 		return fmt.Errorf("maximum number of users reached")
-	}
-	if strings.Contains(respStr, "ter:FixedUser") {
+	case strings.Contains(subcode, "FixedUser"):
 		return fmt.Errorf("cannot modify or delete fixed user")
-	}
-	if strings.Contains(respStr, "ter:Password") {
+	case strings.Contains(subcode, "Password"):
 		return fmt.Errorf("password does not meet requirements")
-	}
-	if strings.Contains(respStr, "NotAuthorized") || strings.Contains(respStr, "ter:NotAuthorized") {
+	case strings.Contains(subcode, "NotAuthorized"):
 		return fmt.Errorf("not authorized")
 	}
 
-	// Try to extract fault reason text (with any namespace prefix)
-	// Look for Reason > Text pattern used in SOAP 1.2
-	if reason := extractBetweenTags(respStr, "Reason"); reason != "" {
-		if text := extractTextElement(reason); text != "" {
-			return fmt.Errorf("SOAP fault: %s", text)
-		}
+	switch {
+	case code != "" && reason != "":
+		return fmt.Errorf("%s: %s", code, reason)
+	case reason != "":
+		return fmt.Errorf("%s", reason)
+	default:
+		return fmt.Errorf("SOAP fault: %s", code)
 	}
-
-	// Try SOAP 1.1 faultstring
-	if start := strings.Index(respStr, "<faultstring>"); start != -1 {
-		start += len("<faultstring>")
-		if end := strings.Index(respStr[start:], "</faultstring>"); end != -1 {
-			return fmt.Errorf("SOAP fault: %s", respStr[start:start+end])
-		}
-	}
-
-	return fmt.Errorf("SOAP fault in response")
-}
-
-// extractBetweenTags finds content between opening and closing tags with any namespace prefix
-func extractBetweenTags(s, localName string) string {
-	// Find the opening tag, matching any namespace prefix and ignoring
-	// attributes: <localName>, <localName ...>, <prefix:localName>,
-	// <prefix:localName ...>. Scan '<' boundaries and compare the de-prefixed
-	// tag name, skipping closing tags, declarations and comments.
-	contentStart := -1
-	for i := 0; i+1 < len(s); i++ {
-		if s[i] != '<' || s[i+1] == '/' || s[i+1] == '?' || s[i+1] == '!' {
-			continue
-		}
-		gt := strings.Index(s[i:], ">")
-		if gt == -1 {
-			return ""
-		}
-		if matchLocalName(s[i+1:i+gt], localName) {
-			contentStart = i + gt + 1
-			break
-		}
-	}
-	if contentStart == -1 {
-		return ""
-	}
-
-	// Find the matching closing tag and return the content before it. We must
-	// stop at the '<' that opens the closing tag, not at the ":localName>"
-	// inside it — otherwise a namespaced close tag like </tt:XAddr> leaves a
-	// trailing "</tt" on the extracted value.
-	content := s[contentStart:]
-	for i := 0; i+1 < len(content); i++ {
-		if content[i] != '<' || content[i+1] != '/' {
-			continue
-		}
-		gt := strings.Index(content[i:], ">")
-		if gt == -1 {
-			return ""
-		}
-		if matchLocalName(content[i+2:i+gt], localName) {
-			return content[:i]
-		}
-	}
-	return ""
-}
-
-// matchLocalName reports whether an XML tag body (the text between '<'/'</' and
-// '>', e.g. `tt:Username Type="x"` or `XAddr`) names the given local element,
-// ignoring any namespace prefix, attributes and a self-closing slash.
-func matchLocalName(tag, localName string) bool {
-	if sp := strings.IndexByte(tag, ' '); sp != -1 {
-		tag = tag[:sp]
-	}
-	tag = strings.TrimSuffix(tag, "/")
-	if c := strings.LastIndex(tag, ":"); c != -1 {
-		tag = tag[c+1:]
-	}
-	return tag == localName
-}
-
-// findTagOpen finds the start of an opening XML tag with any namespace prefix
-func findTagOpen(s, localName string) int {
-	// Try with namespace prefix: <prefix:Name> or <prefix:Name ...>
-	marker := ":" + localName + ">"
-	if idx := strings.Index(s, marker); idx != -1 {
-		for i := idx - 1; i >= 0 && i > idx-20; i-- {
-			if s[i] == '<' && (i+1 >= len(s) || s[i+1] != '/') {
-				return i
-			}
-		}
-	}
-	marker = ":" + localName + " "
-	if idx := strings.Index(s, marker); idx != -1 {
-		for i := idx - 1; i >= 0 && i > idx-20; i-- {
-			if s[i] == '<' && (i+1 >= len(s) || s[i+1] != '/') {
-				return i
-			}
-		}
-	}
-	// Try without prefix
-	for _, pattern := range []string{"<" + localName + ">", "<" + localName + " "} {
-		if idx := strings.Index(s, pattern); idx != -1 {
-			return idx
-		}
-	}
-	return -1
-}
-
-// findTagClose finds the end of a closing XML tag with any namespace prefix,
-// returning offset from the start of the search string
-func findTagClose(s, localName string) int {
-	// Try with namespace prefix: </prefix:Name>
-	marker := ":" + localName + ">"
-	for i := 0; i < len(s); {
-		idx := strings.Index(s[i:], marker)
-		if idx == -1 {
-			break
-		}
-		pos := i + idx
-		// Walk back to find '</'
-		for j := pos - 1; j >= 0 && j > pos-20; j-- {
-			if s[j] == '<' && j+1 < len(s) && s[j+1] == '/' {
-				return pos + len(marker)
-			}
-		}
-		i = pos + len(marker)
-	}
-	// Try without prefix
-	closeTag := "</" + localName + ">"
-	if idx := strings.Index(s, closeTag); idx != -1 {
-		return idx + len(closeTag)
-	}
-	return -1
-}
-
-// extractTextElement extracts text content from a Text element (SOAP 1.2 fault reason)
-func extractTextElement(s string) string {
-	// <Text>...</Text> or <prefix:Text xml:lang="en">...</prefix:Text>.
-	// extractBetweenTags handles namespace prefixes and attributes.
-	return extractBetweenTags(s, "Text")
 }

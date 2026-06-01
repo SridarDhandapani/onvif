@@ -108,26 +108,13 @@ func (c *Client) sendSOAPRequest(endpoint, action, body string) ([]byte, error) 
 	return respBody, nil
 }
 
-// faultDetail extracts a human-readable reason from a SOAP fault body: the
-// fault Subcode value (e.g. "ter:InvalidArgVal") and/or the Reason text. It
-// returns "" if the body is not a recognisable SOAP fault.
+// faultDetail returns a human-readable reason (fault Subcode and/or Reason) for
+// a SOAP fault body, or "" if the body is not a recognisable SOAP fault.
 func faultDetail(resp []byte) string {
-	s := string(resp)
-	if !containsSOAPFault(s) {
-		return ""
+	if err := parseSOAPFault(resp); err != nil {
+		return err.Error()
 	}
-	var parts []string
-	if sub := extractBetweenTags(s, "Subcode"); sub != "" {
-		if v := extractBetweenTags(sub, "Value"); v != "" {
-			parts = append(parts, strings.TrimSpace(v))
-		}
-	}
-	if reason := extractBetweenTags(s, "Reason"); reason != "" {
-		if t := extractTextElement(reason); t != "" {
-			parts = append(parts, strings.TrimSpace(t))
-		}
-	}
-	return strings.Join(parts, ": ")
+	return ""
 }
 
 // getFirstAddress extracts the first address if multiple are provided

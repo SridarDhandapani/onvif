@@ -112,10 +112,10 @@ type Client struct {
 
 // DiscoveryOptions provides options for camera discovery
 type DiscoveryOptions struct {
-	Timeout         time.Duration
-	MulticastAddr   string
-	FetchDetails    bool // Whether to fetch device information during discovery
-	FetchHostname   bool
+	Timeout           time.Duration
+	MulticastAddr     string
+	FetchDetails      bool // Whether to fetch device information during discovery
+	FetchHostname     bool
 	FetchCapabilities bool
 }
 

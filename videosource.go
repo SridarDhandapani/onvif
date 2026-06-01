@@ -14,7 +14,7 @@ func (c *Client) GetVideoSourceModes(camera *Camera) ([]VideoSourceMode, error) 
 	if err != nil {
 		return nil, err
 	}
-	mediaURL := resolveMediaURL(camera)
+	mediaURL := c.resolveMediaURL(camera)
 
 	body := fmt.Sprintf(`<trt:GetVideoSourceModes>
 		<trt:VideoSourceToken>%s</trt:VideoSourceToken>
@@ -70,7 +70,7 @@ func (c *Client) SetVideoSourceMode(camera *Camera, modeToken string) (bool, err
 	if err != nil {
 		return false, err
 	}
-	mediaURL := resolveMediaURL(camera)
+	mediaURL := c.resolveMediaURL(camera)
 
 	body := fmt.Sprintf(`<trt:SetVideoSourceMode>
 		<trt:VideoSourceToken>%s</trt:VideoSourceToken>

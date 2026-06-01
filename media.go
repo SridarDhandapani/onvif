@@ -53,10 +53,7 @@ type videoEncoderXML struct {
 // getProfiles fetches and parses the media profiles, including each profile's
 // full video encoder configuration.
 func (c *Client) getProfiles(camera *Camera) ([]profileXML, error) {
-	if camera.MediaURL == "" {
-		c.GetCapabilities(camera)
-	}
-	mediaURL := resolveMediaURL(camera)
+	mediaURL := c.resolveMediaURL(camera)
 
 	profilesResp, err := c.sendSOAPRequest(mediaURL,
 		"http://www.onvif.org/ver10/media/wsdl/GetProfiles", `<trt:GetProfiles/>`)
@@ -79,7 +76,7 @@ func (c *Client) GetStreamProfiles(camera *Camera) ([]StreamConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	mediaURL := resolveMediaURL(camera)
+	mediaURL := c.resolveMediaURL(camera)
 
 	var streamConfigs []StreamConfig
 
@@ -144,27 +141,19 @@ func (c *Client) GetStreamProfiles(camera *Camera) ([]StreamConfig, error) {
 	return streamConfigs, nil
 }
 
-// resolveMediaURL returns the media service URL for a camera.
-// Uses the discovered URL from GetCapabilities if available, otherwise
-// falls back to path replacement on the device service address.
-func resolveMediaURL(camera *Camera) string {
-	if camera.MediaURL != "" {
-		return camera.MediaURL
+// mediaURLHeuristic derives a likely Media (ver10) service URL from the
+// device-service address. Used only when service discovery reported none.
+func mediaURLHeuristic(address string) string {
+	url := strings.Replace(address, "/device_service", "/media_service", 1)
+	if !strings.Contains(url, "media_service") {
+		url = strings.Replace(address, "/onvif/device_service", "/onvif/media_service", 1)
 	}
-	address := getFirstAddress(camera.Address)
-	mediaURL := strings.Replace(address, "/device_service", "/media_service", 1)
-	if !strings.Contains(mediaURL, "media_service") {
-		mediaURL = strings.Replace(address, "/onvif/device_service", "/onvif/media_service", 1)
-	}
-	return mediaURL
+	return url
 }
 
 // GetStreamUri retrieves the RTSP stream URI for a given profile token
 func (c *Client) GetStreamUri(camera *Camera, profileToken string) (string, error) {
-	if camera.MediaURL == "" {
-		c.GetCapabilities(camera)
-	}
-	mediaURL := resolveMediaURL(camera)
+	mediaURL := c.resolveMediaURL(camera)
 
 	body := fmt.Sprintf(`<trt:GetStreamUri>
 		<trt:StreamSetup>
@@ -196,11 +185,6 @@ func (c *Client) GetStreamUri(camera *Camera, profileToken string) (string, erro
 	var streamUri StreamUriResponse
 	if err := xml.Unmarshal(resp, &streamUri); err == nil && streamUri.MediaUri.Uri != "" {
 		return streamUri.MediaUri.Uri, nil
-	}
-
-	// Fallback to string extraction
-	if uri := extractBetweenTags(string(resp), "Uri"); uri != "" {
-		return uri, nil
 	}
 
 	return "", fmt.Errorf("no stream URI found in response")
@@ -314,7 +298,7 @@ func buildSetVideoEncoderBody(v videoEncoderXML) string {
 // SetVideoEncoderConfiguration replaces the whole configuration and stricter
 // cameras reject partial or invented values.
 func (c *Client) UpdateStreamConfiguration(camera *Camera, encoderToken string, config StreamUpdateConfig) error {
-	mediaURL := resolveMediaURL(camera)
+	mediaURL := c.resolveMediaURL(camera)
 
 	existing, err := c.findVideoEncoderConfig(camera, encoderToken)
 	if err != nil {

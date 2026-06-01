@@ -215,6 +215,9 @@ func deduplicateCameras(cameras []Camera) []Camera {
 
 	for _, camera := range cameras {
 		addresses := strings.Fields(camera.Address)
+		if len(addresses) == 0 {
+			continue // skip probe matches with no XAddrs
+		}
 		key := addresses[0]
 
 		if _, exists := cameraMap[key]; !exists {

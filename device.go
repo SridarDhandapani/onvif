@@ -1,7 +1,6 @@
 package onvif
 
 import (
-	"bytes"
 	"encoding/xml"
 	"fmt"
 	"strings"
@@ -17,8 +16,7 @@ func (c *Client) GetDeviceInformation(camera *Camera) error {
 	deviceInfoResp, err := c.sendSOAPRequest(address,
 		"http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation", deviceInfoBody)
 
-	if err == nil && !bytes.Contains(deviceInfoResp, []byte("SOAP-ENV:Fault")) {
-		// Try structured parsing first
+	if err == nil && parseSOAPFault(deviceInfoResp) == nil {
 		type DeviceInfoResponse struct {
 			Manufacturer    string `xml:"Body>GetDeviceInformationResponse>Manufacturer"`
 			Model           string `xml:"Body>GetDeviceInformationResponse>Model"`
@@ -28,51 +26,13 @@ func (c *Client) GetDeviceInformation(camera *Camera) error {
 		}
 
 		var deviceInfo DeviceInfoResponse
-		if err := xml.Unmarshal(deviceInfoResp, &deviceInfo); err != nil {
-			// Try manual extraction if structured parsing fails
-			respStr := string(deviceInfoResp)
-
-			if start := strings.Index(respStr, "<tds:Manufacturer>"); start != -1 {
-				start += len("<tds:Manufacturer>")
-				if end := strings.Index(respStr[start:], "</tds:Manufacturer>"); end != -1 {
-					deviceInfo.Manufacturer = respStr[start:start+end]
-				}
-			}
-
-			if start := strings.Index(respStr, "<tds:Model>"); start != -1 {
-				start += len("<tds:Model>")
-				if end := strings.Index(respStr[start:], "</tds:Model>"); end != -1 {
-					deviceInfo.Model = respStr[start:start+end]
-				}
-			}
-
-			if start := strings.Index(respStr, "<tds:SerialNumber>"); start != -1 {
-				start += len("<tds:SerialNumber>")
-				if end := strings.Index(respStr[start:], "</tds:SerialNumber>"); end != -1 {
-					deviceInfo.SerialNumber = respStr[start:start+end]
-				}
-			}
-
-			if start := strings.Index(respStr, "<tds:FirmwareVersion>"); start != -1 {
-				start += len("<tds:FirmwareVersion>")
-				if end := strings.Index(respStr[start:], "</tds:FirmwareVersion>"); end != -1 {
-					deviceInfo.FirmwareVersion = respStr[start:start+end]
-				}
-			}
-
-			if start := strings.Index(respStr, "<tds:HardwareId>"); start != -1 {
-				start += len("<tds:HardwareId>")
-				if end := strings.Index(respStr[start:], "</tds:HardwareId>"); end != -1 {
-					deviceInfo.HardwareId = respStr[start:start+end]
-				}
-			}
+		if xml.Unmarshal(deviceInfoResp, &deviceInfo) == nil {
+			camera.Manufacturer = deviceInfo.Manufacturer
+			camera.DeviceModel = deviceInfo.Model
+			camera.FirmwareVersion = deviceInfo.FirmwareVersion
+			camera.SerialNumber = deviceInfo.SerialNumber
+			camera.HardwareId = deviceInfo.HardwareId
 		}
-
-		camera.Manufacturer = deviceInfo.Manufacturer
-		camera.DeviceModel = deviceInfo.Model
-		camera.FirmwareVersion = deviceInfo.FirmwareVersion
-		camera.SerialNumber = deviceInfo.SerialNumber
-		camera.HardwareId = deviceInfo.HardwareId
 	}
 
 	// Get hostname
@@ -95,7 +55,7 @@ func (c *Client) GetHostname(camera *Camera) error {
 	hostnameResp, err := c.sendSOAPRequest(address,
 		"http://www.onvif.org/ver10/device/wsdl/GetHostname", hostnameBody)
 
-	if err == nil && !bytes.Contains(hostnameResp, []byte("SOAP-ENV:Fault")) {
+	if err == nil && parseSOAPFault(hostnameResp) == nil {
 		type HostnameResponse struct {
 			HostnameInfo struct {
 				FromDHCP bool   `xml:"FromDHCP,attr"`
@@ -104,26 +64,12 @@ func (c *Client) GetHostname(camera *Camera) error {
 		}
 
 		var hostname HostnameResponse
-		if err := xml.Unmarshal(hostnameResp, &hostname); err == nil {
+		if xml.Unmarshal(hostnameResp, &hostname) == nil {
 			camera.Hostname = hostname.HostnameInfo.Name
 			if hostname.HostnameInfo.FromDHCP {
 				camera.HostnameFrom = "DHCP"
 			} else {
 				camera.HostnameFrom = "Manual"
-			}
-		} else {
-			// Try manual extraction
-			respStr := string(hostnameResp)
-			if start := strings.Index(respStr, "<tds:Name>"); start != -1 {
-				start += len("<tds:Name>")
-				if end := strings.Index(respStr[start:], "</tds:Name>"); end != -1 {
-					camera.Hostname = respStr[start:start+end]
-				}
-			} else if start := strings.Index(respStr, "<tt:Name>"); start != -1 {
-				start += len("<tt:Name>")
-				if end := strings.Index(respStr[start:], "</tt:Name>"); end != -1 {
-					camera.Hostname = respStr[start:start+end]
-				}
 			}
 		}
 	}
@@ -213,11 +159,8 @@ func (c *Client) SetSystemDateTime(camera *Camera) error {
 		return fmt.Errorf("failed to set date/time: %v", err)
 	}
 
-	if bytes.Contains(setResp, []byte("SOAP-ENV:Fault")) {
-		if bytes.Contains(setResp, []byte("NotAuthorized")) {
-			return fmt.Errorf("not authorized to set date/time")
-		}
-		return fmt.Errorf("SOAP fault in response")
+	if err := parseSOAPFault(setResp); err != nil {
+		return fmt.Errorf("failed to set date/time: %w", err)
 	}
 
 	return nil
@@ -262,8 +205,8 @@ func (c *Client) GetCapabilities(camera *Camera) error {
 		// Parse capabilities including service URLs
 		type CapabilitiesResponse struct {
 			Media struct {
-				XAddr            string `xml:"XAddr"`
-				StreamingCaps    struct {
+				XAddr         string `xml:"XAddr"`
+				StreamingCaps struct {
 					VideoSources int `xml:"VideoSources,attr"`
 					VideoOutputs int `xml:"VideoOutputs,attr"`
 					AudioSources int `xml:"AudioSources,attr"`
@@ -294,18 +237,8 @@ func (c *Client) GetCapabilities(camera *Camera) error {
 				camera.ImagingURL = capabilities.Imaging.XAddr
 			}
 		}
-
-		// Fallback: extract service URLs from response string
-		if camera.MediaURL == "" {
-			if xaddr := extractServiceXAddr(respStr, "Media"); xaddr != "" {
-				camera.MediaURL = xaddr
-			}
-		}
-		if camera.ImagingURL == "" {
-			if xaddr := extractServiceXAddr(respStr, "Imaging"); xaddr != "" {
-				camera.ImagingURL = xaddr
-			}
-		}
+		// Service URLs that GetCapabilities does not report (notably Media2) are
+		// resolved via GetServices in discoverServices().
 	}
 
 	return nil
@@ -356,31 +289,52 @@ func (c *Client) GetServices(camera *Camera) error {
 	return nil
 }
 
-// resolveMedia2URL returns the Media2 service URL, discovering it via
-// GetServices when not already known and falling back to a heuristic rewrite of
-// the device-service address.
+// discoverServices populates the camera's service URLs (Media / Media2 /
+// Imaging) using the device's own advertisements: GetCapabilities first, then
+// GetServices for anything still missing (notably Media2, and the real
+// host/port for cameras that serve ONVIF off the default endpoint). Best-effort
+// — anything still unset is left to a per-service heuristic fallback.
+func (c *Client) discoverServices(camera *Camera) {
+	if camera.MediaURL == "" || camera.ImagingURL == "" {
+		_ = c.GetCapabilities(camera)
+	}
+	if camera.MediaURL == "" || camera.ImagingURL == "" || camera.Media2URL == "" {
+		_ = c.GetServices(camera)
+	}
+}
+
+// resolveMediaURL returns the Media (ver10) service URL, discovering it if
+// needed and falling back to a heuristic rewrite of the device-service address.
+func (c *Client) resolveMediaURL(camera *Camera) string {
+	if camera.MediaURL == "" {
+		c.discoverServices(camera)
+	}
+	if camera.MediaURL != "" {
+		return camera.MediaURL
+	}
+	return mediaURLHeuristic(getFirstAddress(camera.Address))
+}
+
+// resolveImagingURL returns the Imaging service URL, discovering it if needed
+// and falling back to a heuristic rewrite of the device-service address.
+func (c *Client) resolveImagingURL(camera *Camera) string {
+	if camera.ImagingURL == "" {
+		c.discoverServices(camera)
+	}
+	if camera.ImagingURL != "" {
+		return camera.ImagingURL
+	}
+	return imagingURLHeuristic(getFirstAddress(camera.Address))
+}
+
+// resolveMedia2URL returns the Media2 (ver20) service URL, discovering it if
+// needed and falling back to a heuristic rewrite of the device-service address.
 func (c *Client) resolveMedia2URL(camera *Camera) string {
 	if camera.Media2URL == "" {
-		_ = c.GetServices(camera) // best-effort; populates Media2URL when available
+		c.discoverServices(camera)
 	}
 	if camera.Media2URL != "" {
 		return camera.Media2URL
 	}
 	return getMedia2URL(getFirstAddress(camera.Address))
-}
-
-// extractServiceXAddr finds the XAddr URL within a service section of a capabilities response.
-// It looks for a section like <tt:Media><tt:XAddr>http://...</tt:XAddr></tt:Media>
-func extractServiceXAddr(respStr, serviceName string) string {
-	// Find the service section (with any namespace prefix)
-	sectionStart := findTagOpen(respStr, serviceName)
-	if sectionStart == -1 {
-		return ""
-	}
-	sectionEnd := findTagClose(respStr[sectionStart:], serviceName)
-	if sectionEnd == -1 {
-		return ""
-	}
-	section := respStr[sectionStart : sectionStart+sectionEnd]
-	return extractBetweenTags(section, "XAddr")
 }
