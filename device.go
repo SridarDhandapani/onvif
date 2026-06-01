@@ -216,6 +216,9 @@ func (c *Client) GetCapabilities(camera *Camera) error {
 			Imaging struct {
 				XAddr string `xml:"XAddr"`
 			} `xml:"Body>GetCapabilitiesResponse>Capabilities>Extension>Imaging"`
+			PTZ struct {
+				XAddr string `xml:"XAddr"`
+			} `xml:"Body>GetCapabilitiesResponse>Capabilities>PTZ"`
 			Device struct {
 				IO struct {
 					RelayOutputs int `xml:"RelayOutputs,attr"`
@@ -235,6 +238,10 @@ func (c *Client) GetCapabilities(camera *Camera) error {
 			}
 			if capabilities.Imaging.XAddr != "" {
 				camera.ImagingURL = capabilities.Imaging.XAddr
+			}
+			if capabilities.PTZ.XAddr != "" {
+				camera.PTZURL = capabilities.PTZ.XAddr
+				camera.PTZSupport = true
 			}
 		}
 		// Service URLs that GetCapabilities does not report (notably Media2) are
@@ -284,6 +291,11 @@ func (c *Client) GetServices(camera *Camera) error {
 			if camera.ImagingURL == "" {
 				camera.ImagingURL = s.XAddr
 			}
+		case "http://www.onvif.org/ver20/ptz/wsdl", "http://www.onvif.org/ver10/ptz/wsdl":
+			if camera.PTZURL == "" {
+				camera.PTZURL = s.XAddr
+				camera.PTZSupport = true
+			}
 		}
 	}
 	return nil
@@ -298,7 +310,7 @@ func (c *Client) discoverServices(camera *Camera) {
 	if camera.MediaURL == "" || camera.ImagingURL == "" {
 		_ = c.GetCapabilities(camera)
 	}
-	if camera.MediaURL == "" || camera.ImagingURL == "" || camera.Media2URL == "" {
+	if camera.MediaURL == "" || camera.ImagingURL == "" || camera.Media2URL == "" || camera.PTZURL == "" {
 		_ = c.GetServices(camera)
 	}
 }

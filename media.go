@@ -12,6 +12,28 @@ type profileXML struct {
 	Token string          `xml:"token,attr"`
 	Name  string          `xml:"Name"`
 	VEC   videoEncoderXML `xml:"VideoEncoderConfiguration"`
+	VSC   videoSourceXML  `xml:"VideoSourceConfiguration"`
+}
+
+// videoSourceXML captures the VideoSourceConfiguration fields needed to round
+// trip a SetVideoSourceConfiguration request. As with the encoder config, the
+// whole configuration is replaced on write, so we read it and send it back
+// intact, changing only the Extension>Rotate block. Image rotation lives here.
+type videoSourceXML struct {
+	Token       string `xml:"token,attr"`
+	Name        string `xml:"Name"`
+	UseCount    int    `xml:"UseCount"`
+	SourceToken string `xml:"SourceToken"`
+	Bounds      struct {
+		X      int `xml:"x,attr"`
+		Y      int `xml:"y,attr"`
+		Width  int `xml:"width,attr"`
+		Height int `xml:"height,attr"`
+	} `xml:"Bounds"`
+	Rotate struct {
+		Mode   string `xml:"Mode"`   // "OFF" | "ON" | "AUTO"
+		Degree int    `xml:"Degree"` // 90/180/270 when Mode=ON
+	} `xml:"Extension>Rotate"`
 }
 
 // videoEncoderXML captures every VideoEncoderConfiguration field needed to round
@@ -360,4 +382,202 @@ func (c *Client) UpdateSubStream(camera *Camera, config StreamUpdateConfig) erro
 	}
 
 	return c.UpdateStreamConfiguration(camera, subStream.EncoderToken, config)
+}
+
+// findVideoSourceConfig returns the first profile's VideoSourceConfiguration
+// that carries a token (the configuration that holds image rotation).
+func (c *Client) findVideoSourceConfig(camera *Camera) (videoSourceXML, error) {
+	profiles, err := c.getProfiles(camera)
+	if err != nil {
+		return videoSourceXML{}, err
+	}
+	for _, p := range profiles {
+		if p.VSC.Token != "" {
+			return p.VSC, nil
+		}
+	}
+	return videoSourceXML{}, fmt.Errorf("no video source configuration found")
+}
+
+// GetVideoSourceConfiguration reads the camera's VideoSourceConfiguration.
+func (c *Client) GetVideoSourceConfiguration(camera *Camera) (videoSourceXML, error) {
+	return c.findVideoSourceConfig(camera)
+}
+
+// buildSetVideoSourceBody renders a SetVideoSourceConfiguration request that
+// preserves every field the camera reported (so strict cameras don't reject a
+// partial config), following the ONVIF schema element order.
+func buildSetVideoSourceBody(v videoSourceXML) string {
+	name := v.Name
+	if name == "" {
+		name = "VideoSourceConfig"
+	}
+
+	// Rotation extension, emitted only when a mode is present.
+	rotateBlock := ""
+	if v.Rotate.Mode != "" {
+		degree := ""
+		if strings.EqualFold(v.Rotate.Mode, "ON") {
+			degree = fmt.Sprintf("\n\t\t\t\t\t<tt:Degree>%d</tt:Degree>", v.Rotate.Degree)
+		}
+		rotateBlock = fmt.Sprintf(`
+			<tt:Extension xmlns:tt="http://www.onvif.org/ver10/schema">
+				<tt:Rotate>
+					<tt:Mode>%s</tt:Mode>%s
+				</tt:Rotate>
+			</tt:Extension>`, v.Rotate.Mode, degree)
+	}
+
+	return fmt.Sprintf(`
+	<trt:SetVideoSourceConfiguration>
+		<trt:Configuration token="%s">
+			<tt:Name xmlns:tt="http://www.onvif.org/ver10/schema">%s</tt:Name>
+			<tt:UseCount xmlns:tt="http://www.onvif.org/ver10/schema">%d</tt:UseCount>
+			<tt:SourceToken xmlns:tt="http://www.onvif.org/ver10/schema">%s</tt:SourceToken>
+			<tt:Bounds xmlns:tt="http://www.onvif.org/ver10/schema" x="%d" y="%d" width="%d" height="%d"/>%s
+		</trt:Configuration>
+		<trt:ForcePersistence>true</trt:ForcePersistence>
+	</trt:SetVideoSourceConfiguration>`,
+		v.Token, name, v.UseCount, v.SourceToken,
+		v.Bounds.X, v.Bounds.Y, v.Bounds.Width, v.Bounds.Height,
+		rotateBlock)
+}
+
+// SetVideoSourceConfiguration writes back a (modified) VideoSourceConfiguration.
+func (c *Client) SetVideoSourceConfiguration(camera *Camera, vsc videoSourceXML) error {
+	mediaURL := c.resolveMediaURL(camera)
+	resp, err := c.sendSOAPRequest(mediaURL,
+		"http://www.onvif.org/ver10/media/wsdl/SetVideoSourceConfiguration",
+		buildSetVideoSourceBody(vsc))
+	if err != nil {
+		return fmt.Errorf("failed to set video source configuration: %v", err)
+	}
+	if err := parseSOAPFault(resp); err != nil {
+		return err
+	}
+	return nil
+}
+
+// rotationToRotate maps a RotationMode to the ONVIF Rotate (Mode, Degree).
+func rotationToRotate(mode RotationMode) (rotateMode string, degree int) {
+	if mode == RotationOff {
+		return "OFF", 0
+	}
+	return "ON", int(mode)
+}
+
+// rotateToRotation maps an ONVIF Rotate (Mode, Degree) back to a RotationMode.
+func rotateToRotation(rotateMode string, degree int) RotationMode {
+	if !strings.EqualFold(rotateMode, "ON") {
+		return RotationOff
+	}
+	switch degree {
+	case 90:
+		return Rotation90
+	case 180:
+		return Rotation180
+	case 270:
+		return Rotation270
+	default:
+		return RotationOff
+	}
+}
+
+// GetRotation returns the camera's current image rotation.
+func (c *Client) GetRotation(camera *Camera) (RotationMode, error) {
+	vsc, err := c.findVideoSourceConfig(camera)
+	if err != nil {
+		return RotationOff, err
+	}
+	return rotateToRotation(vsc.Rotate.Mode, vsc.Rotate.Degree), nil
+}
+
+// SetRotation sets the image rotation (Off/90/180/270) via a read-modify-write
+// of the VideoSourceConfiguration, changing only the Rotate block.
+func (c *Client) SetRotation(camera *Camera, mode RotationMode) error {
+	vsc, err := c.findVideoSourceConfig(camera)
+	if err != nil {
+		return err
+	}
+	vsc.Rotate.Mode, vsc.Rotate.Degree = rotationToRotate(mode)
+	return c.SetVideoSourceConfiguration(camera, vsc)
+}
+
+// RotationDiagnostics returns the raw GetVideoSourceConfigurations and
+// GetVideoSourceConfigurationOptions SOAP responses, for diagnosing why a camera
+// rejects or ignores a rotation change.
+func (c *Client) RotationDiagnostics(camera *Camera) string {
+	mediaURL := c.resolveMediaURL(camera)
+	var b strings.Builder
+
+	if resp, err := c.sendSOAPRequest(mediaURL,
+		"http://www.onvif.org/ver10/media/wsdl/GetVideoSourceConfigurations",
+		`<trt:GetVideoSourceConfigurations/>`); err != nil {
+		fmt.Fprintf(&b, "GetVideoSourceConfigurations error: %v\n\n", err)
+	} else {
+		fmt.Fprintf(&b, "=== GetVideoSourceConfigurations ===\n%s\n\n", string(resp))
+	}
+
+	token := ""
+	if cfg, err := c.findVideoSourceConfig(camera); err == nil {
+		token = cfg.Token
+	}
+	optBody := fmt.Sprintf(`<trt:GetVideoSourceConfigurationOptions><trt:ConfigurationToken>%s</trt:ConfigurationToken></trt:GetVideoSourceConfigurationOptions>`, token)
+	if resp, err := c.sendSOAPRequest(mediaURL,
+		"http://www.onvif.org/ver10/media/wsdl/GetVideoSourceConfigurationOptions", optBody); err != nil {
+		fmt.Fprintf(&b, "GetVideoSourceConfigurationOptions error: %v\n", err)
+	} else {
+		fmt.Fprintf(&b, "=== GetVideoSourceConfigurationOptions (token=%s) ===\n%s\n", token, string(resp))
+	}
+	return b.String()
+}
+
+// GetRotationOptions reports the image-rotation capability the camera advertises
+// via GetVideoSourceConfigurationOptions: whether rotation is supported, the
+// allowed degrees, and whether applying it requires a reboot. Cameras that don't
+// implement the call (or don't support rotation) yield Supported=false.
+func (c *Client) GetRotationOptions(camera *Camera) (RotationOptions, error) {
+	vsc, err := c.findVideoSourceConfig(camera)
+	if err != nil {
+		return RotationOptions{}, err
+	}
+	mediaURL := c.resolveMediaURL(camera)
+	body := fmt.Sprintf(`<trt:GetVideoSourceConfigurationOptions><trt:ConfigurationToken>%s</trt:ConfigurationToken></trt:GetVideoSourceConfigurationOptions>`, vsc.Token)
+	resp, err := c.sendSOAPRequest(mediaURL,
+		"http://www.onvif.org/ver10/media/wsdl/GetVideoSourceConfigurationOptions", body)
+	if err != nil {
+		return RotationOptions{}, fmt.Errorf("failed to get video source configuration options: %v", err)
+	}
+	if err := parseSOAPFault(resp); err != nil {
+		return RotationOptions{}, err
+	}
+	return parseRotationOptions(resp), nil
+}
+
+// parseRotationOptions extracts the Rotate capability from a
+// GetVideoSourceConfigurationOptions response. The allowed degrees are reported
+// as <tt:DegreeList><tt:Items>N</tt:Items>…</tt:DegreeList> (ONVIF IntItems).
+func parseRotationOptions(resp []byte) RotationOptions {
+	var parsed struct {
+		Rotate struct {
+			Mode       []string `xml:"Mode"`
+			DegreeList struct {
+				Items []int `xml:"Items"`
+			} `xml:"DegreeList"`
+			Reboot bool `xml:"Reboot,attr"`
+		} `xml:"Body>GetVideoSourceConfigurationOptionsResponse>Options>Extension>Rotate"`
+	}
+	_ = xml.Unmarshal(resp, &parsed)
+
+	opts := RotationOptions{
+		Modes:   parsed.Rotate.Mode,
+		Degrees: parsed.Rotate.DegreeList.Items,
+		Reboot:  parsed.Rotate.Reboot,
+	}
+	for _, m := range parsed.Rotate.Mode {
+		if strings.EqualFold(m, "ON") {
+			opts.Supported = true
+		}
+	}
+	return opts
 }

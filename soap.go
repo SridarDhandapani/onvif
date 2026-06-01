@@ -59,7 +59,8 @@ func (c *Client) sendSOAPRequest(endpoint, action, body string) ([]byte, error) 
             xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
             xmlns:tt="http://www.onvif.org/ver10/schema"
             xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"
-            xmlns:tr2="http://www.onvif.org/ver20/media/wsdl">
+            xmlns:tr2="http://www.onvif.org/ver20/media/wsdl"
+            xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
 	<s:Header>%s</s:Header>
 	<s:Body>%s</s:Body>
 </s:Envelope>`, authHeader, body)

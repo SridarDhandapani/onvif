@@ -42,7 +42,49 @@ type Camera struct {
 	MediaURL   string
 	Media2URL  string
 	ImagingURL string
+	PTZURL     string
 }
+
+// PTZVector is a normalized pan/tilt/zoom vector. For moves the components are
+// velocities (ContinuousMove) or translations/positions (Relative/AbsoluteMove);
+// ONVIF normalizes each component to roughly -1..1 (zoom typically 0..1).
+type PTZVector struct {
+	Pan  float64
+	Tilt float64
+	Zoom float64
+}
+
+// PTZStatus is the current PTZ position and movement state.
+type PTZStatus struct {
+	Position  PTZVector
+	MoveState string // "IDLE" / "MOVING" / "UNKNOWN"
+	UTCTime   string
+}
+
+// PTZConfig is a PTZ configuration attached to a profile.
+type PTZConfig struct {
+	Token     string
+	Name      string
+	NodeToken string
+}
+
+// RotationOptions describes the image-rotation capability the camera advertises.
+type RotationOptions struct {
+	Supported bool     // "ON" is an allowed rotate mode
+	Modes     []string // reported modes (OFF/ON/AUTO)
+	Degrees   []int    // allowed degrees when Mode=ON (e.g. 90,180,270)
+	Reboot    bool     // changing rotation requires a reboot to take effect
+}
+
+// RotationMode is the image rotation applied to the video source.
+type RotationMode int
+
+const (
+	RotationOff RotationMode = 0
+	Rotation90  RotationMode = 90
+	Rotation180 RotationMode = 180
+	Rotation270 RotationMode = 270
+)
 
 // StreamConfig represents a video stream configuration
 type StreamConfig struct {
