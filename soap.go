@@ -2,6 +2,7 @@ package onvif
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha1"
 	"crypto/tls"
 	"encoding/base64"
@@ -12,37 +13,44 @@ import (
 	"time"
 )
 
-// generatePasswordDigest creates WS-Security password digest
-func generatePasswordDigest(username, password string) (string, string, string) {
-	created := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-	nonce := fmt.Sprintf("%d", time.Now().UnixNano())
-	nonceBytes := []byte(nonce)
-	nonceB64 := base64.StdEncoding.EncodeToString(nonceBytes)
+// generatePasswordDigest creates a WS-Security UsernameToken password digest:
+// Base64(SHA1(nonce + created + password)), with a cryptographically random
+// nonce per the WS-Security spec. Returns the digest, the Base64 nonce, and the
+// Created timestamp.
+func generatePasswordDigest(password string) (digest, nonceB64, created string) {
+	created = time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		// Extremely unlikely; fall back to a time-derived nonce.
+		nonce = []byte(fmt.Sprintf("%d", time.Now().UnixNano()))
+	}
+	nonceB64 = base64.StdEncoding.EncodeToString(nonce)
 
 	h := sha1.New()
-	h.Write(nonceBytes)
+	h.Write(nonce)
 	h.Write([]byte(created))
 	h.Write([]byte(password))
-	digest := base64.StdEncoding.EncodeToString(h.Sum(nil))
+	digest = base64.StdEncoding.EncodeToString(h.Sum(nil))
 
 	return digest, nonceB64, created
 }
 
 // sendSOAPRequest sends a SOAP request to an ONVIF device
 func (c *Client) sendSOAPRequest(endpoint, action, body string) ([]byte, error) {
-	digest, nonce, created := generatePasswordDigest(c.Username, c.Password)
+	digest, nonce, created := generatePasswordDigest(c.Password)
 
 	authHeader := ""
 	if c.Username != "" {
 		authHeader = fmt.Sprintf(`
-		<Security xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
-			<UsernameToken>
-				<Username>%s</Username>
-				<Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">%s</Password>
-				<Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">%s</Nonce>
-				<Created xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">%s</Created>
-			</UsernameToken>
-		</Security>`, c.Username, digest, nonce, created)
+		<wsse:Security s:mustUnderstand="1" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
+			<wsse:UsernameToken>
+				<wsse:Username>%s</wsse:Username>
+				<wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">%s</wsse:Password>
+				<wsse:Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">%s</wsse:Nonce>
+				<wsu:Created>%s</wsu:Created>
+			</wsse:UsernameToken>
+		</wsse:Security>`, escapeXML(c.Username), digest, nonce, created)
 	}
 
 	soapRequest := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
@@ -61,7 +69,9 @@ func (c *Client) sendSOAPRequest(endpoint, action, body string) ([]byte, error) 
 		return nil, err
 	}
 
-	req.Header.Set("Content-Type", "application/soap+xml; charset=utf-8")
+	// SOAP 1.2 conveys the action as a Content-Type parameter. Keep the legacy
+	// SOAPAction header too for devices that still look for it (SOAP 1.1 style).
+	req.Header.Set("Content-Type", fmt.Sprintf("application/soap+xml; charset=utf-8; action=%q", action))
 	req.Header.Set("SOAPAction", action)
 
 	timeout := c.Timeout

@@ -28,41 +28,12 @@ and what is intentionally deferred.
 - **SetSystemDateAndTime** omits the optional `TimeZone` (clock sync only;
   avoids `ter:InvalidArgVal` on strict devices).
 - **Discovery** no longer panics on a ProbeMatch with empty `XAddrs`.
-
-## Deferred (TODO — re-test on all models when changing these)
-
-These touch the auth/transport layer, so they re-affect **every** call on
-**every** device. They were deferred deliberately because the three target
-cameras currently authenticate with the existing code; change them only with a
-full end-to-end re-test.
-
-### D. WS-Security UsernameToken (`soap.go`)
-
-Current `generatePasswordDigest` / `sendSOAPRequest`:
-
-- **Nonce is not random** — it is `time.Now().UnixNano()` formatted as a decimal
-  string. WS-Security requires a cryptographically random nonce. Fix: generate
-  ~16 bytes via `crypto/rand`, use the raw bytes in the digest
-  (`SHA1(nonce + created + password)`) and base64 of the raw bytes in
-  `<Nonce>`.
-- **Header is not the canonical form** — it uses a default `xmlns` with no
-  `wsse:`/`wsu:` prefixes and no `s:mustUnderstand="1"`. Fix: emit
-  `<wsse:Security s:mustUnderstand="1">` with `wsse:UsernameToken`,
-  `wsse:Password Type="…#PasswordDigest"`, `wsse:Nonce`, and `wsu:Created`
-  in the WS-Security utility namespace.
-
-### E. SOAP 1.2 action binding (`soap.go`)
-
-The envelope is SOAP 1.2 (`application/soap+xml`), but the action is sent only
-as a separate `SOAPAction` HTTP header (SOAP 1.1 style). SOAP 1.2 conveys the
-action as a Content-Type parameter:
-
-```
-Content-Type: application/soap+xml; charset=utf-8; action="<action-uri>"
-```
-
-Fix: add the `action` parameter to the Content-Type. Keeping the `SOAPAction`
-header as well is harmless and maximises device compatibility.
+- **WS-Security UsernameToken** uses a cryptographically random nonce
+  (`crypto/rand`) and the canonical header form: `<wsse:Security
+  s:mustUnderstand="1">` with `wsse:`/`wsu:` prefixes and `wsu:Created`.
+- **SOAP 1.2 action** is sent as the `action` parameter of the
+  `Content-Type` header; the legacy `SOAPAction` header is kept for
+  SOAP 1.1-style devices.
 
 ## Minor / optional
 
