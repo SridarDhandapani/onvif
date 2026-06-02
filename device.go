@@ -185,15 +185,31 @@ func (c *Client) SetHostname(camera *Camera, name string) error {
 	return nil
 }
 
-// GetCapabilities fetches device capabilities
-func (c *Client) GetCapabilities(camera *Camera) error {
+// GetCapabilitiesRaw fetches device capabilities and returns the raw SOAP/XML
+// response. The structured GetCapabilities parses only the fields this library
+// acts on; callers that need the full picture (vendor extensions, network or
+// event capabilities, etc.) can parse these bytes themselves. On a SOAP fault
+// the response bytes are still returned alongside the error.
+func (c *Client) GetCapabilitiesRaw(camera *Camera) ([]byte, error) {
 	address := getFirstAddress(camera.Address)
 
 	capabilitiesBody := `<tds:GetCapabilities><tds:Category>All</tds:Category></tds:GetCapabilities>`
-	capabilitiesResp, err := c.sendSOAPRequest(address,
+	resp, err := c.sendSOAPRequest(address,
 		"http://www.onvif.org/ver10/device/wsdl/GetCapabilities", capabilitiesBody)
+	if err != nil {
+		return nil, err
+	}
+	if err := parseSOAPFault(resp); err != nil {
+		return resp, err
+	}
+	return resp, nil
+}
 
-	if err == nil {
+// GetCapabilities fetches device capabilities
+func (c *Client) GetCapabilities(camera *Camera) error {
+	capabilitiesResp, _ := c.GetCapabilitiesRaw(camera)
+
+	if capabilitiesResp != nil {
 		respStr := string(capabilitiesResp)
 
 		// Check for PTZ support
